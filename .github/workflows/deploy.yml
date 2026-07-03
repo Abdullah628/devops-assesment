@@ -259,11 +259,15 @@ jobs:
           F="${REGISTRY}/${OWNER}/${FRONTEND_IMAGE}:${TAG}"
 
           if [ -d k8s ] && ls k8s/*deployment*.yaml >/dev/null 2>&1; then
-            # Task 3 manifests present — deploy them for real, pinned to this SHA.
-            echo "Applying k8s/ manifests"
+            # Task 3 manifests present. Inject the real, already-loaded image
+            # reference into the manifests BEFORE apply, so pods start with the
+            # correct image immediately. (Applying the placeholder tag first and
+            # then `kubectl set image` creates ImagePullBackOff pods that, with
+            # maxUnavailable:0, deadlock the rollout.)
+            echo "Applying k8s/ manifests pinned to ${TAG}"
+            sed -i "s|image: .*/${BACKEND_IMAGE}:.*|image: ${B}|"  k8s/backend-deployment.yaml
+            sed -i "s|image: .*/${FRONTEND_IMAGE}:.*|image: ${F}|" k8s/frontend-deployment.yaml
             kubectl apply -f k8s/
-            kubectl set image deployment/backend  backend="$B"
-            kubectl set image deployment/frontend frontend="$F"
           else
             # Task 3 not landed yet — do a minimal but real deploy so the rollout
             # actually happens today. Replaced automatically once k8s/ exists.
@@ -273,8 +277,22 @@ jobs:
             kubectl expose deployment backend --port=8080
           fi
 
-          kubectl rollout status deployment/backend  --timeout=120s
-          kubectl rollout status deployment/frontend --timeout=120s
+          # Wait for both rollouts. On failure, dump diagnostics so the real
+          # cause (crash, bad image, failing probe) is visible in the log
+          # instead of a bare "timed out" message.
+          set +e
+          kubectl rollout status deployment/backend  --timeout=150s; rc_b=$?
+          kubectl rollout status deployment/frontend --timeout=150s; rc_f=$?
+          if [ $rc_b -ne 0 ] || [ $rc_f -ne 0 ]; then
+            echo "::group::Rollout failed — diagnostics"
+            kubectl get pods -o wide
+            kubectl describe pods
+            echo "--- backend logs ---";  kubectl logs -l app=backend  --all-containers --tail=50 || true
+            echo "--- frontend logs ---"; kubectl logs -l app=frontend --all-containers --tail=50 || true
+            echo "--- recent events ---"; kubectl get events --sort-by=.lastTimestamp | tail -30
+            echo "::endgroup::"
+            exit 1
+          fi
           echo; kubectl get pods -o wide
 
       - name: Verify backend responds inside the cluster
