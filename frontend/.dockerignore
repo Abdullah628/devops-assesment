@@ -1,0 +1,13 @@
+# Applies to the ./frontend build context (see backend/.dockerignore for why a
+# per-context file is required in addition to the repo-root .dockerignore).
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+*.md
+.git
+.vscode
+.idea

@@ -1,0 +1,33 @@
+# --- Secrets & local config (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+kubeconfig
+*.kubeconfig
+
+# --- Node ---
+node_modules/
+npm-debug.log*
+coverage/
+
+# --- Terraform ---
+# State can contain secrets in plaintext; it belongs in the remote backend only.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+crash.log
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

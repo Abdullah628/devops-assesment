@@ -1,0 +1,62 @@
+# Local development stack — NOT for production (that's what Kubernetes is for).
+#
+# Brings up three containers on a private bridge network:
+#   frontend (nginx)  -> proxies /api to backend
+#   backend  (node)   -> serves the API on 8080, connects to db
+#   db       (postgres) -> only reachable inside the compose network
+#
+# Run:   docker compose up -d
+# Test:  curl http://localhost:8080          -> Application is running
+#        curl http://localhost:8080/health   -> {"status":"ok"}
+#        open http://localhost:8081           -> frontend page
+
+services:
+  backend:
+    build: ./backend
+    # Expose 8080 on the host so the assessment's curl commands work directly.
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-appdb}
+      DB_USER: ${DB_USER:-appuser}
+      # Sourced from your local .env (git-ignored). Never hardcode a real value.
+      DB_PASSWORD: ${DB_PASSWORD:-changeme-local-only}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    # Frontend container listens on 8080 internally; publish it on host 8081.
+    ports:
+      - "8081:8080"
+    environment:
+      # Nginx proxies /api/* to this address inside the compose network.
+      BACKEND_URL: "http://backend:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-appdb}
+      POSTGRES_USER: ${DB_USER:-appuser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme-local-only}
+    # No host port published on purpose: the database is reachable only from
+    # other containers on this network, mirroring "private DB" in production.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-appuser} -d ${DB_NAME:-appdb}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:

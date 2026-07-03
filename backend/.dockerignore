@@ -1,0 +1,16 @@
+# Docker reads the .dockerignore from the build CONTEXT root. Since compose
+# builds this image with context ./backend, the repo-root .dockerignore does
+# not apply here — this file is what actually keeps node_modules, local env
+# files and test output out of the build context and final image.
+node_modules
+npm-debug.log*
+coverage
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+*.md
+.git
+.vscode
+.idea

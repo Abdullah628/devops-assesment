@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DevOps Assessment — Platform</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>DevOps Assessment Platform</h1>
+    <p class="subtitle">Frontend container talking to the backend API</p>
+
+    <section class="status">
+      <div class="row">
+        <span class="label">Backend root (<code>/api/</code>)</span>
+        <span id="root-status" class="badge pending">checking…</span>
+      </div>
+      <div class="row">
+        <span class="label">Backend health (<code>/api/health</code>)</span>
+        <span id="health-status" class="badge pending">checking…</span>
+      </div>
+    </section>
+
+    <pre id="output" class="output">Loading…</pre>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

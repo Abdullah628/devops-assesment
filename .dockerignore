@@ -1,0 +1,17 @@
+# Keep build contexts small and prevent secrets/junk from entering images.
+**/node_modules
+**/npm-debug.log*
+**/.git
+**/.gitignore
+**/.env
+**/.env.*
+!**/.env.example
+**/coverage
+**/.vscode
+**/.idea
+**/*.md
+**/Dockerfile
+**/.dockerignore
+**/terraform
+**/k8s
+**/docs

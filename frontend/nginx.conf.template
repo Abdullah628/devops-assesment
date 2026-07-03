@@ -1,0 +1,45 @@
+# Nginx config template.
+#
+# The official nginx:alpine image runs envsubst over every *.template file in
+# /etc/nginx/templates at startup and writes the result into /etc/nginx/conf.d.
+# That lets us inject ${BACKEND_URL} from an environment variable — supplied by
+# docker-compose locally and by a ConfigMap in Kubernetes — so the SAME image
+# works in both places without a rebuild.
+
+server {
+    listen       8080;
+    server_name  _;
+
+    # Security & caching headers for the static assets.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    root   /usr/share/nginx/html;
+    index  index.html;
+
+    # Serve the SPA/static files; fall back to index.html.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Reverse-proxy API calls to the backend. The frontend only ever talks to
+    # /api/* — it never knows the backend's real address, which stays internal.
+    location /api/ {
+        # Strip the /api prefix before forwarding: /api/health -> /health.
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass         ${BACKEND_URL};
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout    30s;
+    }
+
+    # Lightweight endpoint for the frontend's own Kubernetes probes.
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+}
