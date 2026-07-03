@@ -31,6 +31,13 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        # Numeric UID is REQUIRED with runAsNonRoot: true — Kubernetes cannot
+        # verify a non-numeric image user (the Dockerfile's `USER node`), so it
+        # refuses to start the container. 1000 is the uid of the `node` user in
+        # the node:20-alpine base image.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
