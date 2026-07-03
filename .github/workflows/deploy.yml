@@ -1,0 +1,343 @@
+# CI/CD pipeline for the DevOps assessment.
+#
+# This pipeline is REAL end-to-end and costs nothing to run:
+#
+#   build-test-push  →  release (only on v* tags)
+#                    →  deploy  (real kind cluster + kubectl rollout)
+#
+#   * Tests gate everything (jest).
+#   * Images are built and pushed to the GitHub Container Registry (ghcr.io)
+#     using the built-in GITHUB_TOKEN — no external secrets, real pullable images.
+#   * Images are tagged with the immutable git commit SHA — never `latest`.
+#   * The deploy job spins up a real Kubernetes cluster (kind) inside the runner,
+#     loads the images, applies the manifests, and waits for a real rollout.
+#
+# The only thing NOT wired here is Azure AKS/ACR — that needs a paid subscription
+# and is documented instead (docs/cicd.md, docs/database-connectivity.md).
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  # Manual trigger for the REAL EKS deploy. Opt-in on purpose so a real cluster
+  # is only ever touched (and billed) when you explicitly ask for it.
+  workflow_dispatch:
+    inputs:
+      deploy_to_eks:
+        description: "Deploy to the real EKS cluster (incurs AWS cost — tear down after!)"
+        type: boolean
+        default: false
+
+# Least privilege:
+#   contents: write  -> create GitHub Releases
+#   packages: write  -> push images to ghcr.io
+#   id-token: write  -> OIDC federation to assume the AWS IAM role (no stored keys)
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: backend
+  FRONTEND_IMAGE: frontend
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Build, test, and push real images to ghcr.io.
+  #    On pull requests we build + test but do NOT push (nothing is published
+  #    from an unreviewed PR).
+  # ---------------------------------------------------------------------------
+  build-test-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      owner_lc: ${{ steps.meta.outputs.owner_lc }}
+    env:
+      # The `secrets` context cannot be used in `if:` conditionals, so we surface
+      # "is AWS configured?" as a job-level env var and test that in step `if:`.
+      AWS_CONFIGURED: ${{ secrets.AWS_ROLE_ARN != '' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute image tag + lowercase owner
+        id: meta
+        run: |
+          # Immutable git SHA as the tag (never `latest`).
+          echo "image_tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          # ghcr requires the owner segment to be lowercase.
+          echo "owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run backend tests (gate)
+        working-directory: backend
+        run: npm test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build both images locally (load into the runner's docker) so we can
+      # smoke-test before publishing anything.
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          load: true
+          tags: ${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          load: true
+          tags: ${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the backend image
+        env:
+          TAG: ${{ steps.meta.outputs.image_tag }}
+        run: |
+          # Prove the image boots and serves /health before we publish it.
+          docker run -d --name backend-smoke -p 8080:8080 "${BACKEND_IMAGE}:${TAG}"
+          for i in $(seq 1 15); do
+            if curl -fs http://localhost:8080/health; then ok=1; break; fi
+            sleep 1
+          done
+          docker rm -f backend-smoke >/dev/null 2>&1 || true
+          test "${ok:-0}" = "1" || { echo "backend image failed smoke test"; exit 1; }
+          echo; echo "backend image serves /health ✓"
+
+      # Publish only for real pushes to the repo (not PRs).
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Tag & push images to ghcr.io
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ steps.meta.outputs.image_tag }}
+          OWNER: ${{ steps.meta.outputs.owner_lc }}
+        run: |
+          set -euo pipefail
+          for img in "$BACKEND_IMAGE" "$FRONTEND_IMAGE"; do
+            REF="${REGISTRY}/${OWNER}/${img}:${TAG}"
+            docker tag "${img}:${TAG}" "$REF"
+            docker push "$REF"
+            echo "pushed ${REF}"
+          done
+
+      # Amazon ECR push — the assessment's AWS cloud registry.
+      #
+      # Real when the AWS_ROLE_ARN secret exists (OIDC federation — no static
+      # keys), MOCK otherwise so the pipeline stays green with no AWS account.
+      # The mock prints the REAL `aws ecr` / `docker push` commands behind a
+      # [MOCK] label; nothing is silently faked.
+      - name: Configure AWS credentials (OIDC)
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && env.AWS_CONFIGURED == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Push images to Amazon ECR (mock unless AWS_ROLE_ARN set)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.meta.outputs.image_tag }}
+          MOCK: ${{ secrets.AWS_ROLE_ARN == '' && 'true' || 'false' }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        run: |
+          set -euo pipefail
+          if [ "$MOCK" = "true" ]; then
+            REG="<account-id>.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "[MOCK] aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${REG}"
+          else
+            ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+            REG="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            aws ecr get-login-password --region "$AWS_REGION" \
+              | docker login --username AWS --password-stdin "$REG"
+          fi
+          for img in "$BACKEND_IMAGE" "$FRONTEND_IMAGE"; do
+            REF="${REG}/${img}:${TAG}"
+            if [ "$MOCK" = "true" ]; then
+              echo "[MOCK] aws ecr create-repository --repository-name ${img}  # if absent"
+              echo "[MOCK] docker tag ${img}:${TAG} ${REF}"
+              echo "[MOCK] docker push ${REF}"
+            else
+              # ECR has no implicit repos — create on first push (idempotent).
+              aws ecr describe-repositories --repository-names "$img" >/dev/null 2>&1 \
+                || aws ecr create-repository --repository-name "$img" >/dev/null
+              docker tag "${img}:${TAG}" "$REF"
+              docker push "$REF"
+              echo "pushed ${REF}"
+            fi
+          done
+
+  # ---------------------------------------------------------------------------
+  # 2) GitHub Release — only when a version tag (v*) is pushed.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: build-test-push
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build-test-push.outputs.image_tag }}
+          OWNER: ${{ needs.build-test-push.outputs.owner_lc }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Release ${GITHUB_REF_NAME}" \
+            --notes "Automated release for commit ${TAG}.
+
+          Images (tag \`${TAG}\`):
+          - ${REGISTRY}/${OWNER}/${BACKEND_IMAGE}:${TAG}
+          - ${REGISTRY}/${OWNER}/${FRONTEND_IMAGE}:${TAG}"
+
+  # ---------------------------------------------------------------------------
+  # 3) DEFAULT deploy path — a REAL but FREE Kubernetes rollout on a kind
+  #    cluster created inside the runner. Runs automatically on every push so
+  #    the deploy is always validated without any AWS cost. (For the real EKS
+  #    rollout, see job 4, which is manual/opt-in.)
+  # ---------------------------------------------------------------------------
+  deploy-kind:
+    needs: build-test-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    env:
+      TAG: ${{ needs.build-test-push.outputs.image_tag }}
+      OWNER: ${{ needs.build-test-push.outputs.owner_lc }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: assessment
+
+      - name: Load images into the cluster
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          for img in "$BACKEND_IMAGE" "$FRONTEND_IMAGE"; do
+            REF="${REGISTRY}/${OWNER}/${img}:${TAG}"
+            docker pull "$REF"
+            # Preload onto kind nodes so kubelet uses the local copy (the SHA tag
+            # defaults to imagePullPolicy: IfNotPresent, so no registry auth is
+            # needed inside the cluster).
+            kind load docker-image "$REF" --name assessment
+          done
+
+      - name: Deploy and wait for rollout
+        run: |
+          set -euo pipefail
+          B="${REGISTRY}/${OWNER}/${BACKEND_IMAGE}:${TAG}"
+          F="${REGISTRY}/${OWNER}/${FRONTEND_IMAGE}:${TAG}"
+
+          if [ -d k8s ] && ls k8s/*deployment*.yaml >/dev/null 2>&1; then
+            # Task 3 manifests present — deploy them for real, pinned to this SHA.
+            echo "Applying k8s/ manifests"
+            kubectl apply -f k8s/
+            kubectl set image deployment/backend  backend="$B"
+            kubectl set image deployment/frontend frontend="$F"
+          else
+            # Task 3 not landed yet — do a minimal but real deploy so the rollout
+            # actually happens today. Replaced automatically once k8s/ exists.
+            echo "k8s/ manifests not present yet — minimal real deploy"
+            kubectl create deployment backend  --image="$B" --replicas=2
+            kubectl create deployment frontend --image="$F" --replicas=2
+            kubectl expose deployment backend --port=8080
+          fi
+
+          kubectl rollout status deployment/backend  --timeout=120s
+          kubectl rollout status deployment/frontend --timeout=120s
+          echo; kubectl get pods -o wide
+
+      - name: Verify backend responds inside the cluster
+        run: |
+          set -euo pipefail
+          kubectl port-forward deployment/backend 8080:8080 >/dev/null 2>&1 &
+          PF=$!
+          for i in $(seq 1 15); do
+            if curl -fs http://localhost:8080/health; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$PF" 2>/dev/null || true
+          test "${ok:-0}" = "1" || { echo "backend not reachable in cluster"; exit 1; }
+          echo; echo "backend answers /health inside the kind cluster ✓"
+
+  # ---------------------------------------------------------------------------
+  # 4) REAL EKS deploy — opt-in only (manual `workflow_dispatch` with
+  #    deploy_to_eks = true). This touches a real, billed AWS cluster, so it
+  #    never runs automatically. Requires:
+  #      secrets.AWS_ROLE_ARN     — IAM role for GitHub OIDC to assume
+  #      vars.AWS_REGION          — e.g. us-east-1
+  #      vars.EKS_CLUSTER_NAME    — the cluster provisioned by terraform/ (Task 5)
+  #    Remember: `terraform destroy` / delete the cluster when you're done.
+  #
+  #    Optional approval gate: create a `production` Environment in the repo
+  #    (Settings -> Environments) with required reviewers, then add this line
+  #    back under the job to require a human approval before any real deploy:
+  #        environment: production
+  # ---------------------------------------------------------------------------
+  deploy-eks:
+    needs: build-test-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_to_eks
+    env:
+      TAG: ${{ needs.build-test-push.outputs.image_tag }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Point kubectl at the EKS cluster
+        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "$AWS_REGION"
+
+      - name: Deploy to EKS and wait for rollout
+        run: |
+          set -euo pipefail
+          ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          REG="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          B="${REG}/${BACKEND_IMAGE}:${TAG}"
+          F="${REG}/${FRONTEND_IMAGE}:${TAG}"
+
+          # Task 3 manifests define the deployments/services/ingress; we pin the
+          # images to this build's immutable SHA tag.
+          kubectl apply -f k8s/
+          kubectl set image deployment/backend  backend="$B"
+          kubectl set image deployment/frontend frontend="$F"
+          kubectl rollout status deployment/backend  --timeout=180s
+          kubectl rollout status deployment/frontend --timeout=180s
+          echo; kubectl get pods -o wide
+          echo; kubectl get ingress,svc
