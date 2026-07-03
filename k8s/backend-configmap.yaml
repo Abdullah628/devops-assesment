@@ -1,0 +1,22 @@
+# Non-secret backend configuration.
+#
+# Everything here is safe to commit — it is plain config, not credentials. The
+# password lives in a Secret (see backend-secret-example.yaml), never here.
+#
+# In a real EKS environment these values point at the private RDS endpoint; the
+# deployment consumes them with `envFrom`, so the same container image runs
+# unchanged across local/kind and EKS — only this ConfigMap differs per env.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  labels:
+    app: backend
+data:
+  PORT: "8080"
+  # RDS endpoint (private, not publicly accessible). Placeholder for local/kind;
+  # in EKS this is the Route53 private-zone name of the RDS instance.
+  DB_HOST: "app-db.internal"
+  DB_PORT: "5432"
+  DB_NAME: "appdb"
+  DB_USER: "appuser"

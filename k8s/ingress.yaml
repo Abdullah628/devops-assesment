@@ -1,0 +1,33 @@
+# Ingress — the ONLY externally-reachable entrypoint. It exposes the frontend
+# and nothing else; the backend stays internal (ClusterIP, no Ingress rule).
+#
+# ingressClassName: nginx keeps this portable — it works on local kind (install
+# the ingress-nginx controller) and on EKS alike. On EKS the production-native
+# alternative is the AWS Load Balancer Controller (ingressClassName: alb, with
+# alb.ingress.kubernetes.io/* annotations) provisioning a real ALB; see
+# docs/cicd.md / terraform notes. We keep nginx here so the same manifest is
+# testable for free.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  labels:
+    app: frontend
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false" # true once TLS/cert-manager is wired
+spec:
+  ingressClassName: nginx
+  rules:
+    # Host-based routing. For local testing add to your hosts file:
+    #   127.0.0.1  app.local
+    # On EKS, point a DNS record at the ingress-nginx LoadBalancer instead.
+    - host: app.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

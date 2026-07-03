@@ -137,7 +137,7 @@ flowchart TD
 |-------|------|--------------|-----------|
 | **A** ✅ | 1 | backend, frontend, Dockerfiles, docker-compose, .dockerignore, .env.example | `docker compose up -d` → both curl commands pass (**done & verified**) |
 | **B** ✅ | 2 | `.github/workflows/deploy.yml`, `docs/cicd.md` | Pipeline green: tests + build; mock push/deploy log clearly (**done**) |
-| **C** | 3 | `k8s/*` manifests | `kind` cluster → `kubectl apply` → pods Ready 2/2 |
+| **C** ✅ | 3 | `k8s/*` manifests | `kind` cluster → `kubectl apply` → pods Ready 2/2 (**manifests done; validated offline + auto-applied by CI deploy-kind**) |
 | **D** | 4 | `docs/database-connectivity.md` | Explains private endpoint, DNS, NSG, verification |
 | **E** | 5 | `terraform/` custom modules + README | `terraform validate` + `fmt -check` pass |
 | **F** | 6,7 | `docs/architecture.md`, `troubleshooting.md`, `future-improvements.md`, top-level `README.md` | Docs complete |

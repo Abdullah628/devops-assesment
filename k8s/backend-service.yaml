@@ -1,0 +1,21 @@
+# Backend Service — INTERNAL ONLY.
+#
+# type: ClusterIP means this Service has no external IP and is unreachable from
+# the internet. It is resolvable in-cluster as `backend` (DNS: backend.<ns>.svc),
+# which is exactly the address the frontend's Nginx proxies /api/* to
+# (BACKEND_URL=http://backend:8080). There is deliberately NO Ingress for the
+# backend — only the frontend is exposed (see ingress.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

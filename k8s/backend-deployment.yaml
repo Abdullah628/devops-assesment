@@ -1,0 +1,83 @@
+# Backend Deployment — the Node/Express API on port 8080.
+#
+# Key production properties (all required by Task 3):
+#   * 2 replicas (highly available; survives one pod dying).
+#   * readiness + liveness probes on /health.
+#   * resource requests AND limits (schedulable + bounded).
+#   * config from a ConfigMap, password from a Secret (envFrom).
+#   * image is pinned to an immutable tag, NEVER :latest. CI overrides it with
+#     the git SHA via `kubectl set image` on every deploy.
+#   * runs non-root with a hardened securityContext.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # never drop below full capacity during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          # Immutable tag (not :latest). CI replaces this with the commit SHA
+          # via `kubectl set image`; for local kind, load the image and run the
+          # same set-image command (see the deploy notes).
+          image: ghcr.io/abdullah628/backend:v1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          # Non-secret config (host/port/name/user) + the password Secret.
+          envFrom:
+            - configMapRef:
+                name: backend-config
+            - secretRef:
+                name: backend-secret
+          # Readiness: should this pod receive traffic yet? /health is cheap and
+          # does NOT touch the DB, so a DB blip won't depool every backend pod.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Liveness: is the process wedged and needs a restart? Same endpoint,
+          # slower cadence so a transient hiccup doesn't trigger a needless kill.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
