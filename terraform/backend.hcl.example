@@ -1,0 +1,12 @@
+# Copy to backend.hcl and fill in your values, then:
+#   terraform init -backend-config=backend.hcl
+#
+# The bucket and DynamoDB table must already exist (one-time bootstrap — see
+# README "Remote backend & state locking"). Use a SEPARATE key per environment
+# so dev/staging/prod each have isolated state.
+
+bucket         = "my-tf-state-bucket-CHANGE_ME"
+key            = "devops-assessment/dev/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "my-tf-locks-CHANGE_ME"
+encrypt        = true
