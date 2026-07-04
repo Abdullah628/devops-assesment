@@ -42,12 +42,13 @@ resource "aws_ecr_lifecycle_policy" "this" {
       },
       {
         rulePriority = 2
-        description  = "Keep only the last 20 tagged images"
+        description  = "Keep only the last 20 images"
         selection = {
-          tagStatus     = "tagged"
-          tagPrefixList = ["v", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
-          countType     = "imageCountMoreThan"
-          countNumber   = 20
+          # tagStatus "any" avoids ECR's 10-item tagPrefixList limit while still
+          # capping how many images we retain.
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 20
         }
         action = { type = "expire" }
       }

@@ -83,9 +83,9 @@ variable "eks_endpoint_public_access" {
 # ---- Database ----
 
 variable "db_engine_version" {
-  description = "PostgreSQL engine version."
+  description = "PostgreSQL major version. Use the MAJOR only (e.g. \"16\") so RDS picks the latest available minor — pinning an exact minor can break when AWS retires it."
   type        = string
-  default     = "16.3"
+  default     = "16"
 }
 
 variable "db_instance_class" {
@@ -104,6 +104,12 @@ variable "db_multi_az" {
   description = "Run an RDS standby in a second AZ (recommended for prod)."
   type        = bool
   default     = false
+}
+
+variable "db_backup_retention_days" {
+  description = "Automated backup retention (days). 0 disables backups — needed for restricted Free Tier accounts; use 7+ for prod."
+  type        = number
+  default     = 0
 }
 
 # ---- Observability ----

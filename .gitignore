@@ -23,6 +23,11 @@ coverage/
 crash.log
 *.tfvars
 !*.tfvars.example
+# Per-environment configs are non-secret (RDS password lives in Secrets Manager),
+# so they are versioned. Never put real secrets in these.
+!dev.tfvars
+!staging.tfvars
+!prod.tfvars
 override.tf
 override.tf.json
 
