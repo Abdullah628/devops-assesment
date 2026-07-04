@@ -131,7 +131,116 @@ failure, and #7 "deployed but not reachable" — see Part 2.)*
 
 ---
 
-## 2. Standard troubleshooting Q&A (Task 6)
+## 2. Standard troubleshooting Q&A
 
-*To be completed in Task 6 — the 15 assessment questions, answered briefly, each
-cross-referencing the incident above where relevant.*
+### 1. Pod is in `CrashLoopBackOff`. What do you check?
+`kubectl describe pod <p>` (Events) and `kubectl logs <p> --previous` (why it died
+last time). Common causes: app crashes on startup (bad/missing env, ConfigMap or
+Secret not mounted), `OOMKilled` (raise memory limits), a failing **liveness**
+probe repeatedly killing it, wrong command/entrypoint, or a dependency unavailable
+at boot. (We hit an adjacent one — `CreateContainerConfigError` from a bad
+securityContext; see the incident above.)
+
+### 2. Deployment is successful, but app is not reachable. What do you check?
+Walk the traffic chain: are pods **Ready** (`kubectl get pods`)? Does the Service
+have **endpoints** (`kubectl get endpoints <svc>` — empty = label selector mismatch)?
+Right Service port/`targetPort`? Is the **Ingress** correct and the ingress
+controller running with an address? DNS/LoadBalancer provisioned? Any NetworkPolicy
+blocking it? (Our rollout deadlock made pods never Ready — same symptom.)
+
+### 3. Difference between readiness and liveness probe?
+- **Readiness** = "can this pod receive traffic *yet*?" Fail → removed from Service
+  endpoints (no traffic), **not** restarted.
+- **Liveness** = "is this pod still healthy?" Fail → kubelet **restarts** the
+  container.
+Use readiness for temporary unavailability (warming up, dependency blip), liveness
+for a wedged process. Our `/health` backs both and deliberately does **not** touch
+the DB, so a DB hiccup doesn't restart pods.
+
+### 4. Docker build works locally but fails in pipeline. Why?
+Environment differences: files present locally but **not committed** (so not in the
+CI build context), a `.dockerignore` excluding needed files, **architecture** mismatch
+(amd64 vs arm64 — we hit this live), stale local cache masking a missing dependency,
+missing build args/secrets, registry-auth/network differences, or case-sensitive
+paths (Linux runner vs Windows/Mac).
+
+### 5. Pipeline fails during Docker build. What do you check?
+The build log's failing step/layer; base-image pull failures (Docker Hub rate limits
+or auth), a failing `RUN` (dependency install/network), files missing from the
+context, runner disk space, registry credentials, and Dockerfile syntax. Reproduce
+locally with the **same** context (`docker build ./service`).
+
+### 6. Certificate renewal failed. What do you check?
+With cert-manager/Let's Encrypt: cert-manager pod logs, and
+`kubectl describe certificate/order/challenge`. Is the **ACME HTTP-01 challenge
+reachable** (ingress path open, DNS points at the LB)? DNS-01 records correct? Hit an
+ACME **rate limit**? Wrong/misconfigured Issuer, or clock skew? Check the cert's
+expiry and the CertificateRequest status.
+
+### 7. Ingress returns 502 or 504. What do you check?
+**502** = backend refused/returned garbage; **504** = backend too slow / no response.
+Check: backend pods Ready and Service **endpoints** populated, backend actually
+listening on the `targetPort`, readiness probe passing, ingress read/timeout vs a
+slow backend, ingress-controller health, and SG/NetworkPolicy between controller and
+pods.
+
+### 8. Vendor SFTP connection to port 22 times out. What do you check?
+A **timeout** (vs refused) points at network/firewall dropping packets, not the app.
+Check: your **security group / NACL egress** allows outbound 22 to the vendor, the
+vendor's firewall **allow-lists your egress IP** (the NAT gateway's EIP), a route to
+the internet exists (private subnet → NAT), DNS resolves the vendor host, and the
+vendor service is actually up. Test with `nc -zv vendor 22` from a pod/node.
+
+### 9. Terraform plan wants to recreate the cluster. What do you check?
+Which attribute shows `# forces replacement` in the plan? Did an input change
+unintentionally (cluster `name`, subnets/VPC, `role_arn`, AZ order)? A provider major
+upgrade re-keying resources? Real drift? Prefer an in-place path (`moved` blocks,
+`state mv`); **never** apply an unexplained cluster replacement in prod — it's an
+outage + possible data loss. (See `terraform/README.md`.)
+
+### 10. How would you upgrade AKS/EKS safely?
+One **minor version at a time** (no skipping): **control plane first**
+(`kubernetes_version` bump, in-place), then the **node group** (managed rolling
+replacement, `max_unavailable = 1`). First check deprecated APIs (`pluto`/`kubectl`)
+and add-on compatibility (CNI, CoreDNS, kube-proxy). Roll **dev → staging → prod**.
+2+ replicas + a PodDisruptionBudget keep it zero-downtime.
+
+### 11. Frontend loads, but backend API calls fail. What do you check?
+Browser devtools **Network** tab (status code, CORS, the actual URL called). Then the
+frontend's proxy config (our nginx maps `/api/*` → the `backend` Service), whether the
+backend is reachable in-cluster
+(`kubectl exec deploy/frontend -- wget -qO- backend:8080/health`), backend pods
+Ready + endpoints, the `BACKEND_URL` value, and any NetworkPolicy between frontend and
+backend.
+
+### 12. Backend pod is running, but database connection times out. What do you check?
+A timeout = network, not auth. Check: the RDS **security group** allows 5432 from the
+node SG, the `DB_HOST`/`DB_PORT` in the ConfigMap, RDS is in the same VPC and
+`available` (not rebooting), private DNS resolves the endpoint, and the connection
+pool/`max_connections` isn't exhausted. Our `/db-check` endpoint tests this
+end-to-end. (Auth failures look different — they return an error, not a hang.)
+
+### 13. Private DNS is not resolving database hostname. What do you check?
+VPC `enableDnsSupport` **and** `enableDnsHostnames` = true; the Route 53 **private
+hosted zone is associated with the VPC**; the record actually exists; you're resolving
+**from inside the VPC** (a pod/node), not your laptop; the DHCP option set uses
+AmazonProvidedDNS; and the hostname is spelled right. Test: `kubectl exec deploy/backend
+-- nslookup <db-host>`.
+
+### 14. How would you rotate database credentials safely?
+Rotate at the **source** (AWS Secrets Manager) — our RDS uses
+`manage_master_user_password`, which supports **automatic rotation**. Secrets Manager
+creates a new version; the app reads the latest via the Secrets Store CSI driver /
+External Secrets Operator; a rolling restart (or a reconnect) picks it up. For
+zero-downtime, use a grace period / dual credentials. Code never changes and nothing
+is hardcoded.
+
+### 15. Secrets were accidentally committed to GitHub. What do you do?
+Treat it as **compromised immediately** — deletion is not enough (it's in history, and
+may be cloned/cached/indexed):
+1. **Rotate/revoke** the secret at its source right now (new key/password).
+2. **Purge history** (`git filter-repo` or BFG) and force-push.
+3. **Invalidate** any sessions/tokens it protected; audit logs for misuse.
+4. **Prevent recurrence**: pre-commit secret scanning (gitleaks), branch protection,
+   GitHub secret scanning, and keep secrets in Secrets Manager — never in git (this
+   repo commits only `*-secret-example` placeholders; see `.gitignore`).
